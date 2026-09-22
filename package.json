@@ -1,6 +1,6 @@
 {
   "name": "contextforge-unity",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Thin ContextForge adapter for Unity Technologies' official Unity MCP relay.",
   "type": "module",
   "bin": {

@@ -3,12 +3,12 @@
   "name": "io.github.smangsty/contextforge-unity",
   "title": "ContextForge Unity",
   "description": "Thin ContextForge adapter for Unity Technologies' official Unity MCP relay.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "contextforge-unity",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "transport": {
         "type": "stdio"
       },
