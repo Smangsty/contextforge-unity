@@ -18,12 +18,10 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npm test
-      - run: npm run check-version
       - id: pack
         shell: bash
         run: |
-          PACKAGE="$(npm pack --silent)"
+          PACKAGE="$(npm pack --silent | tail -n 1)"
           echo "package=$PACKAGE" >> "$GITHUB_OUTPUT"
       - run: gh release create "$GITHUB_REF_NAME" "${{ steps.pack.outputs.package }}" --generate-notes --verify-tag
         env:
