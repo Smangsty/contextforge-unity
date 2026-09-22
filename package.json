@@ -1,0 +1,35 @@
+{
+  "name": "contextforge-unity",
+  "version": "1.0.0",
+  "description": "Thin ContextForge adapter for Unity Technologies' official Unity MCP relay.",
+  "type": "module",
+  "bin": {
+    "contextforge-unity": "bin/contextforge-unity.mjs"
+  },
+  "files": [
+    "bin",
+    "server.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "check-version": "node scripts/check-version.mjs",
+    "prepack": "npm test && npm run check-version"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "contextforge",
+    "mcp",
+    "unity",
+    "unity-ai"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/Smangsty/contextforge-unity",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Smangsty/contextforge-unity.git"
+  }
+}
