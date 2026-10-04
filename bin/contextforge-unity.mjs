@@ -7196,7 +7196,8 @@ var require_dist = __commonJS({
 });
 
 // src/contextforge-unity.mjs
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readdir, readFile } from "node:fs/promises";
 import { win32 as win32Path } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -16928,15 +16929,30 @@ var StdioServerTransport = class {
 };
 
 // src/contextforge-unity.mjs
-var ADAPTER_VERSION = "2.0.1";
+var ADAPTER_VERSION = "2.1.0";
 var UNITY_TOOL_PREFIX = "Unity_";
+var CONTEXTFORGE_UNITY_ROUTE_ARGUMENT = "_contextforgeUnity";
+var CONTEXTFORGE_UNITY_LIST_EDITORS_TOOL = "ContextForgeUnity.ListEditors";
 var CONTEXTFORGE_UNITY_STATUS_TOOL = "ContextForgeUnity.Status";
 var CAPTURE_VIEWPORT_TOOL = "ContextForgeUnity.CaptureViewport";
 var CAPTURE_EDITOR_IMAGE_TOOL = "ContextForgeUnity.CaptureEditorImage";
 var CAPTURE_ASSET_IMAGE_TOOL = "ContextForgeUnity.CaptureAssetImage";
 var DEFAULT_PIPELINE_TIMEOUT_MS = 15e3;
 var MAX_PIPELINE_COMMANDS = 1e3;
+var MAX_UNITY_DISCOVERY_DEPTH = 5;
 var IMAGE_DATA_MARKER = "[emitted as MCP image/png]";
+var DISCOVERY_SKIP_DIRECTORIES = /* @__PURE__ */ new Set([
+  ".git",
+  ".build",
+  "node_modules",
+  "library",
+  "temp",
+  "logs",
+  "obj",
+  "build",
+  "builds",
+  "usersettings"
+]);
 var EXACT_READ_ONLY_COMMANDS = /* @__PURE__ */ new Set([
   "console",
   "console_status",
@@ -16953,6 +16969,16 @@ var READ_ONLY_ANNOTATIONS = Object.freeze({
   destructiveHint: false,
   idempotentHint: true,
   openWorldHint: false
+});
+var CONTEXTFORGE_UNITY_LIST_EDITORS_TOOL_DEFINITION = Object.freeze({
+  name: CONTEXTFORGE_UNITY_LIST_EDITORS_TOOL,
+  description: "List live Unity Editor Pipeline instances discovered inside the configured ContextForge project scope.",
+  inputSchema: Object.freeze({
+    type: "object",
+    properties: Object.freeze({}),
+    additionalProperties: false
+  }),
+  annotations: READ_ONLY_ANNOTATIONS
 });
 var SYNTHETIC_TOOLS = Object.freeze([
   {
@@ -17080,6 +17106,147 @@ function resolveUnityProjectRoot({
   if (configured !== null) return configured;
   throw new Error(
     "ContextForge Unity requires CONTEXTFORGE_UNITY_PROJECT_ROOT. In ContextForge, bind the required launch input to the active project root."
+  );
+}
+function unityProjectPathWithinRoot(projectPathValue, projectRootValue) {
+  const projectPath = normalizeUnityProjectRoot(projectPathValue);
+  const projectRoot = normalizeUnityProjectRoot(projectRootValue);
+  if (projectPath === null || projectRoot === null) return false;
+  const projectKey = normalizePathKey(projectPath);
+  const rootKey = normalizePathKey(projectRoot);
+  return projectKey === rootKey || projectKey.startsWith(rootKey + "\\");
+}
+function unityProjectPathMatchesRootExactly(projectPathValue, projectRootValue) {
+  const projectPath = normalizeUnityProjectRoot(projectPathValue);
+  const projectRoot = normalizeUnityProjectRoot(projectRootValue);
+  return projectPath !== null && projectRoot !== null && normalizePathKey(projectPath) === normalizePathKey(projectRoot);
+}
+var ROUTING_SCHEMA = Object.freeze({
+  type: "object",
+  description: "Optional ContextForge Unity routing metadata. projectPath is authoritative; port only disambiguates duplicate live instances. This object is removed before forwarding arguments to Unity.",
+  properties: Object.freeze({
+    projectPath: Object.freeze({
+      type: "string",
+      description: "Absolute Unity project path reported by ContextForgeUnity.ListEditors. Required whenever routing metadata is supplied."
+    }),
+    port: Object.freeze({
+      type: "integer",
+      minimum: 1,
+      maximum: 65535,
+      description: "Optional Pipeline loopback port used only to disambiguate duplicate instances of the same project."
+    })
+  }),
+  required: Object.freeze(["projectPath"]),
+  additionalProperties: false
+});
+function addUnityRoutingTargetToTool(tool) {
+  if (!isRecord(tool) || !isRecord(tool.inputSchema)) return tool;
+  const schema = tool.inputSchema;
+  if (schema.type !== void 0 && schema.type !== "object") return tool;
+  const properties = isRecord(schema.properties) ? schema.properties : {};
+  if (Object.prototype.hasOwnProperty.call(properties, CONTEXTFORGE_UNITY_ROUTE_ARGUMENT)) {
+    throw new Error("UNITY_ROUTING_ARGUMENT_COLLISION");
+  }
+  return {
+    ...tool,
+    inputSchema: {
+      ...schema,
+      type: schema.type ?? "object",
+      properties: {
+        ...properties,
+        [CONTEXTFORGE_UNITY_ROUTE_ARGUMENT]: ROUTING_SCHEMA
+      }
+    }
+  };
+}
+function splitUnityRoutingArguments(value) {
+  const source = isRecord(value) ? value : {};
+  if (!Object.prototype.hasOwnProperty.call(source, CONTEXTFORGE_UNITY_ROUTE_ARGUMENT)) {
+    return Object.freeze({ arguments: source, target: null });
+  }
+  const rawTarget = source[CONTEXTFORGE_UNITY_ROUTE_ARGUMENT];
+  if (!isRecord(rawTarget)) throw new Error("UNITY_TARGET_INVALID");
+  if (Object.keys(rawTarget).some((key) => key !== "projectPath" && key !== "port")) {
+    throw new Error("UNITY_TARGET_INVALID");
+  }
+  const projectPath = normalizeUnityProjectRoot(rawTarget.projectPath);
+  if (projectPath === null) throw new Error("UNITY_TARGET_INVALID");
+  let port = null;
+  if (rawTarget.port !== void 0) {
+    const parsedPort = Number(rawTarget.port);
+    if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+      throw new Error("UNITY_TARGET_INVALID");
+    }
+    port = parsedPort;
+  }
+  const forwarded = { ...source };
+  delete forwarded[CONTEXTFORGE_UNITY_ROUTE_ARGUMENT];
+  return Object.freeze({
+    arguments: forwarded,
+    target: Object.freeze({ projectPath, port })
+  });
+}
+function selectUnityRoute(routesValue, target = null, projectRootValue = null) {
+  const routes = Array.isArray(routesValue) ? routesValue : [];
+  const projectRoot = normalizeUnityProjectRoot(projectRootValue);
+  if (projectRoot === null) throw new Error("UNITY_PROJECT_ROOT_INVALID");
+  const eligible = routes.filter(
+    (route) => typeof route?.descriptor?.projectPath === "string" && unityProjectPathWithinRoot(route.descriptor.projectPath, projectRoot)
+  );
+  if (target !== null) {
+    const normalizedTarget = normalizeUnityProjectRoot(target.projectPath);
+    if (normalizedTarget === null) throw new Error("UNITY_TARGET_INVALID");
+    let matches = eligible.filter(
+      (route) => normalizeUnityProjectRoot(route?.descriptor?.projectPath)?.toLowerCase() === normalizedTarget.toLowerCase()
+    );
+    if (target.port !== null && target.port !== void 0) {
+      matches = matches.filter((route) => route?.descriptor?.port === target.port);
+    }
+    if (matches.length === 0) throw new Error("UNITY_TARGET_UNAVAILABLE");
+    if (matches.length > 1) throw new Error("UNITY_TARGET_AMBIGUOUS");
+    return matches[0];
+  }
+  const exact = eligible.filter(
+    (route) => unityProjectPathMatchesRootExactly(route.descriptor.projectPath, projectRoot)
+  );
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) throw new Error("UNITY_TARGET_AMBIGUOUS");
+  if (eligible.length === 0) throw new Error("UNITY_TARGET_UNAVAILABLE");
+  if (eligible.length > 1) throw new Error("UNITY_TARGET_REQUIRED");
+  return eligible[0];
+}
+async function discoverUnityProjectRoots(projectRootValue, { readdirImpl = readdir, maxDepth = MAX_UNITY_DISCOVERY_DEPTH } = {}) {
+  const projectRoot = normalizeUnityProjectRoot(projectRootValue);
+  if (projectRoot === null) throw new Error("UNITY_PROJECT_ROOT_INVALID");
+  if (!Number.isInteger(maxDepth) || maxDepth < 0 || maxDepth > 12) {
+    throw new Error("UNITY_DISCOVERY_DEPTH_INVALID");
+  }
+  const found = [];
+  async function visit(directory, depth) {
+    let entries;
+    try {
+      entries = await readdirImpl(directory, { withFileTypes: true });
+    } catch (error2) {
+      if (["ENOENT", "EACCES", "EPERM"].includes(error2?.code)) return;
+      throw error2;
+    }
+    const directories = entries.filter((entry) => typeof entry?.isDirectory === "function" && entry.isDirectory()).sort((left, right) => left.name.localeCompare(right.name));
+    const names = new Set(directories.map((entry) => entry.name.toLowerCase()));
+    if (names.has("assets") && names.has("projectsettings")) {
+      found.push(normalizeUnityProjectRoot(directory));
+      return;
+    }
+    if (depth >= maxDepth) return;
+    for (const entry of directories) {
+      if (DISCOVERY_SKIP_DIRECTORIES.has(entry.name.toLowerCase())) continue;
+      await visit(win32Path.join(directory, entry.name), depth + 1);
+    }
+  }
+  await visit(projectRoot, 0);
+  return Object.freeze(
+    [...new Set(found.filter((value) => value !== null))].sort(
+      (left, right) => left.localeCompare(right)
+    )
   );
 }
 function pipelineDescriptorPath(projectRootValue) {
@@ -17246,6 +17413,12 @@ async function fetchPipelineCatalog(descriptor, options = {}) {
     throw new Error("UNITY_PIPELINE_COMMAND_CATALOG_INVALID");
   }
   return payload.commands;
+}
+function fingerprintPipelineCommands(commands) {
+  const canonical = [...commands ?? []].sort(
+    (left, right) => String(left?.name ?? "").localeCompare(String(right?.name ?? ""))
+  );
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 async function executePipelineCommand(descriptor, command, parameters, options = {}) {
   return await pipelineRequest(descriptor, "/api/exec", {
@@ -17493,57 +17666,157 @@ async function evalCapture(descriptor, code, requestOptions) {
   );
   return pipelineResponseToToolResult("eval", response);
 }
-function connectionError(error2, projectRoot) {
-  const message = error2 instanceof Error ? error2.message : String(error2);
+function routeIdentity(route) {
+  return normalizePathKey(route.descriptor.projectPath) + "|" + String(route.descriptor.port);
+}
+function unityRoutingError(error2, projectRoot, toolName = null) {
+  const diagnostic = error2 instanceof Error ? error2.message : String(error2);
+  if (diagnostic.includes("UNITY_TARGET_REQUIRED")) {
+    return toolError(
+      "Multiple Unity Editors are available. Call ContextForgeUnity.ListEditors, then pass _contextforgeUnity.projectPath on the Unity tool call."
+    );
+  }
+  if (diagnostic.includes("UNITY_TARGET_AMBIGUOUS")) {
+    return toolError(
+      "More than one live Unity Editor matches that project path. Add _contextforgeUnity.port from ContextForgeUnity.ListEditors to disambiguate the duplicate instance."
+    );
+  }
+  if (diagnostic.includes("UNITY_TARGET_UNAVAILABLE")) {
+    return toolError(
+      "The requested Unity project is not currently available inside the configured ContextForge project scope."
+    );
+  }
+  if (diagnostic.includes("UNITY_TARGET_INVALID") || diagnostic.includes("UNITY_PROJECT_ROOT_INVALID")) {
+    return toolError("ContextForge Unity routing metadata is invalid.");
+  }
+  if (diagnostic.includes("UNITY_PIPELINE_TOOL_CATALOG_MISMATCH")) {
+    return toolError(
+      "The target Unity Editor exposes a different Pipeline tool catalog than the catalog admitted by ContextForge. Re-inspect the Skill from the intended project scope before targeting that Editor."
+    );
+  }
   return toolError(
-    "ContextForge Unity could not reach Unity Pipeline for " + projectRoot + ". " + message
+    "ContextForge Unity could not complete " + (toolName ?? "the request") + " inside " + projectRoot + ". " + diagnostic
   );
 }
 async function startContextForgeUnity({
   projectRoot = resolveUnityProjectRoot(),
   readFileImpl = readFile,
+  readdirImpl = readdir,
   fetchImpl = fetch
 } = {}) {
+  const normalizedProjectRoot = normalizeUnityProjectRoot(projectRoot);
+  if (normalizedProjectRoot === null) throw new Error("UNITY_PROJECT_ROOT_INVALID");
   const server = new Server(
     { name: "contextforge-unity", version: ADAPTER_VERSION },
     { capabilities: { tools: {} } }
   );
   const requestOptions = { fetchImpl, timeoutMs: DEFAULT_PIPELINE_TIMEOUT_MS };
-  async function live() {
-    return await openLivePipeline(projectRoot, {
-      readFileImpl,
-      ...requestOptions
+  let publishedCatalogFingerprint = null;
+  let publishedCatalogIdentity = null;
+  async function discoverRoutes() {
+    const roots = await discoverUnityProjectRoots(normalizedProjectRoot, { readdirImpl });
+    const attempts = await Promise.allSettled(
+      roots.map(async (root) => {
+        const live = await openLivePipeline(root, {
+          readFileImpl,
+          ...requestOptions
+        });
+        return {
+          descriptor: live.descriptor,
+          status: live.status,
+          commands: null,
+          catalogFingerprint: null
+        };
+      })
+    );
+    return attempts.filter((item) => item.status === "fulfilled").map((item) => item.value).filter(
+      (route) => unityProjectPathWithinRoot(route.descriptor.projectPath, normalizedProjectRoot)
+    ).sort((left, right) => {
+      const pathOrder = left.descriptor.projectPath.localeCompare(
+        right.descriptor.projectPath
+      );
+      return pathOrder !== 0 ? pathOrder : left.descriptor.port - right.descriptor.port;
     });
+  }
+  function selectCatalogRoute(routes) {
+    const exact = routes.filter(
+      (route) => unityProjectPathMatchesRootExactly(
+        route.descriptor.projectPath,
+        normalizedProjectRoot
+      )
+    );
+    if (exact.length === 1) return exact[0];
+    if (exact.length > 1) throw new Error("UNITY_TARGET_AMBIGUOUS");
+    if (routes.length === 0) throw new Error("UNITY_TARGET_UNAVAILABLE");
+    return routes[0];
+  }
+  async function ensureCatalog(route) {
+    if (route.commands === null) {
+      route.commands = await fetchPipelineCatalog(route.descriptor, requestOptions);
+      route.catalogFingerprint = fingerprintPipelineCommands(route.commands);
+    }
+    return route.commands;
+  }
+  async function assertPublishedCatalog(route) {
+    if (publishedCatalogFingerprint === null) return;
+    if (routeIdentity(route) === publishedCatalogIdentity) return;
+    await ensureCatalog(route);
+    if (route.catalogFingerprint !== publishedCatalogFingerprint) {
+      throw new Error("UNITY_PIPELINE_TOOL_CATALOG_MISMATCH");
+    }
+  }
+  function editorSummary(route) {
+    return {
+      projectPath: route.descriptor.projectPath,
+      projectName: route.descriptor.projectName,
+      unityVersion: route.descriptor.unityVersion,
+      pid: route.descriptor.pid,
+      port: route.descriptor.port,
+      mode: route.descriptor.mode,
+      capabilities: route.descriptor.capabilities,
+      status: route.status
+    };
   }
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     try {
-      const { descriptor } = await live();
-      const commands = await fetchPipelineCatalog(descriptor, requestOptions);
+      const routes = await discoverRoutes();
+      const route = selectCatalogRoute(routes);
+      const commands = await ensureCatalog(route);
+      publishedCatalogFingerprint = route.catalogFingerprint;
+      publishedCatalogIdentity = routeIdentity(route);
       return {
-        tools: [...commands.map(commandToTool), ...SYNTHETIC_TOOLS]
+        tools: [
+          ...commands.map(commandToTool).map(addUnityRoutingTargetToTool),
+          ...SYNTHETIC_TOOLS.map(addUnityRoutingTargetToTool),
+          CONTEXTFORGE_UNITY_LIST_EDITORS_TOOL_DEFINITION
+        ]
       };
     } catch (error2) {
       const message = error2 instanceof Error ? error2.message : String(error2);
       throw new Error(
-        "ContextForge Unity could not list tools for " + projectRoot + ". " + message
+        "ContextForge Unity could not list tools inside " + normalizedProjectRoot + ". " + message
       );
     }
   });
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const toolName = request.params.name;
     try {
-      const { descriptor, status } = await live();
-      const toolName = request.params.name;
-      const args = isRecord(request.params.arguments) ? request.params.arguments : {};
+      const routes = await discoverRoutes();
+      if (toolName === CONTEXTFORGE_UNITY_LIST_EDITORS_TOOL) {
+        return toolPayloadResult({
+          projectScope: normalizedProjectRoot,
+          editors: routes.map(editorSummary)
+        });
+      }
+      const split = splitUnityRoutingArguments(request.params.arguments ?? {});
+      const route = selectUnityRoute(routes, split.target, normalizedProjectRoot);
+      await assertPublishedCatalog(route);
+      const { descriptor, status } = route;
+      const args = split.arguments;
       if (toolName === CONTEXTFORGE_UNITY_STATUS_TOOL) {
         return toolPayloadResult({
-          projectPath: descriptor.projectPath,
-          projectName: descriptor.projectName,
-          unityVersion: descriptor.unityVersion,
-          pid: descriptor.pid,
-          port: descriptor.port,
-          mode: descriptor.mode,
-          capabilities: descriptor.capabilities,
-          status
+          projectScope: normalizedProjectRoot,
+          ...editorSummary({ descriptor, status })
         });
       }
       if (toolName === CAPTURE_VIEWPORT_TOOL) {
@@ -17578,7 +17851,7 @@ async function startContextForgeUnity({
       );
       return pipelineResponseToToolResult(commandName, response);
     } catch (error2) {
-      return connectionError(error2, projectRoot);
+      return unityRoutingError(error2, normalizedProjectRoot, toolName);
     }
   });
   await server.connect(new StdioServerTransport());
@@ -17604,13 +17877,19 @@ export {
   CAPTURE_ASSET_IMAGE_TOOL,
   CAPTURE_EDITOR_IMAGE_TOOL,
   CAPTURE_VIEWPORT_TOOL,
+  CONTEXTFORGE_UNITY_LIST_EDITORS_TOOL,
+  CONTEXTFORGE_UNITY_ROUTE_ARGUMENT,
   CONTEXTFORGE_UNITY_STATUS_TOOL,
   DEFAULT_PIPELINE_TIMEOUT_MS,
   MAX_PIPELINE_COMMANDS,
+  MAX_UNITY_DISCOVERY_DEPTH,
   UNITY_TOOL_PREFIX,
+  addUnityRoutingTargetToTool,
   commandToTool,
+  discoverUnityProjectRoots,
   executePipelineCommand,
   fetchPipelineCatalog,
+  fingerprintPipelineCommands,
   isReadOnlyPipelineCommand,
   normalizeUnityProjectRoot,
   openLivePipeline,
@@ -17620,7 +17899,11 @@ export {
   pipelineResponseToToolResult,
   readPipelineDescriptor,
   resolveUnityProjectRoot,
+  selectUnityRoute,
+  splitUnityRoutingArguments,
   startContextForgeUnity,
+  unityProjectPathMatchesRootExactly,
+  unityProjectPathWithinRoot,
   unityToolName,
   validatePipelineDescriptor
 };

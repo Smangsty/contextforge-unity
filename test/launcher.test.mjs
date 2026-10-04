@@ -2,13 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  addUnityRoutingTargetToTool,
   commandToTool,
+  discoverUnityProjectRoots,
   isReadOnlyPipelineCommand,
   normalizeUnityProjectRoot,
   openLivePipeline,
   resolveUnityProjectRoot,
   pipelineCommandName,
   pipelineResponseToToolResult,
+  selectUnityRoute,
+  splitUnityRoutingArguments,
+  unityProjectPathWithinRoot,
   unityToolName,
   validatePipelineDescriptor
 } from "../src/contextforge-unity.mjs";
@@ -39,6 +44,69 @@ test("requires an explicit ContextForge project-root binding", () => {
   assert.throws(
     () => resolveUnityProjectRoot({ configuredRoot: "" }),
     /requires CONTEXTFORGE_UNITY_PROJECT_ROOT/
+  );
+});
+
+test("discovers Unity projects inside a ContextForge workspace without descending into project internals", async () => {
+  const WORKSPACE = "C:\\Workspace";
+  const tree = new Map([
+    [WORKSPACE.toLowerCase(), ["GameA", "Group", "node_modules"]],
+    ["c:\\workspace\\gamea", ["Assets", "ProjectSettings", "Library"]],
+    ["c:\\workspace\\group", ["GameB"]],
+    ["c:\\workspace\\group\\gameb", ["Assets", "ProjectSettings"]],
+    ["c:\\workspace\\node_modules", ["ShouldNotBeVisited"]]
+  ]);
+  const visited = [];
+  const roots = await discoverUnityProjectRoots(WORKSPACE, {
+    readdirImpl: async (directory) => {
+      visited.push(directory.toLowerCase());
+      return (tree.get(directory.toLowerCase()) ?? []).map((name) => ({
+        name,
+        isDirectory: () => true
+      }));
+    }
+  });
+
+  assert.deepEqual(roots, [
+    "C:\\Workspace\\GameA",
+    "C:\\Workspace\\Group\\GameB"
+  ]);
+  assert.equal(visited.includes("c:\\workspace\\gamea\\library"), false);
+  assert.equal(visited.includes("c:\\workspace\\node_modules"), false);
+});
+
+test("routes calls by Unity project identity and strips adapter metadata", () => {
+  const scope = "C:\\Workspace";
+  const gameA = { descriptor: { projectPath: "C:\\Workspace\\GameA", port: 7801 } };
+  const gameB = { descriptor: { projectPath: "C:\\Workspace\\GameB", port: 7802 } };
+  const routes = [gameA, gameB];
+
+  assert.equal(unityProjectPathWithinRoot(gameA.descriptor.projectPath, scope), true);
+  assert.throws(() => selectUnityRoute(routes, null, scope), /UNITY_TARGET_REQUIRED/);
+  assert.equal(
+    selectUnityRoute(
+      routes,
+      { projectPath: gameB.descriptor.projectPath, port: 7802 },
+      scope
+    ),
+    gameB
+  );
+  assert.equal(selectUnityRoute(routes, null, gameA.descriptor.projectPath), gameA);
+
+  const split = splitUnityRoutingArguments({
+    tail: 20,
+    _contextforgeUnity: { projectPath: gameB.descriptor.projectPath }
+  });
+  assert.deepEqual(split.arguments, { tail: 20 });
+  assert.equal(split.target.projectPath, gameB.descriptor.projectPath);
+
+  const routedTool = addUnityRoutingTargetToTool({
+    name: "Unity_console",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false }
+  });
+  assert.equal(
+    routedTool.inputSchema.properties._contextforgeUnity.required[0],
+    "projectPath"
   );
 });
 

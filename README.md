@@ -25,9 +25,30 @@ The adapter does **not** require Unity AI Assistant, Sentis, or Unity's old `%US
 
 - ContextForge on Windows
 - a supported Unity project with `com.unity.pipeline` installed and running
-- `CONTEXTFORGE_UNITY_PROJECT_ROOT` bound to ContextForge's active Unity project root
+- `CONTEXTFORGE_UNITY_PROJECT_ROOT` bound to ContextForge's active project root
 
-The project-root launch input is required. During install or update, choose **Use active project root** before inspection. The adapter intentionally does not fall back to its package working directory, because that can silently inspect the wrong path.
+The project-root launch input is required. During install or update, choose **Use active project root** before inspection. The bound path is a **scope**: it may be an exact Unity project or a workspace containing several Unity projects. The adapter intentionally does not fall back to its package working directory, because that can silently inspect the wrong path.
+
+### Multi-project routing
+
+ContextForge Unity 2.1 discovers Unity projects inside the configured scope by looking for normal Unity project roots (`Assets/` + `ProjectSettings/`). Once a project root is found, discovery stops descending into that project, so it never crawls `Library/`, `Temp/`, package caches, or asset trees. Each candidate is accepted only when its project-local `Library/Pipeline/.unity-pipeline-port` descriptor is present and `/api/status` answers successfully.
+
+`ContextForgeUnity.ListEditors` returns the live project path, project name, Unity version, PID, Pipeline port, mode, capabilities, and status for every discovered Editor without exposing the Pipeline bearer token.
+
+Every routable Unity tool receives an optional `_contextforgeUnity` object:
+
+```json
+{
+  "_contextforgeUnity": {
+    "projectPath": "C:\\Workspace\\GameB",
+    "port": 7802
+  }
+}
+```
+
+`projectPath` is authoritative. `port` is optional and only disambiguates duplicate live instances of the same project path. The adapter removes `_contextforgeUnity` before forwarding parameters to Pipeline.
+
+When the ContextForge scope is an exact Unity project, that Editor is selected automatically. When a workspace contains multiple live Unity projects and no exact project matches the scope root, calls must route explicitly after `ContextForgeUnity.ListEditors`. The tool catalog admitted by ContextForge comes from one live Editor. Calls to another Editor are allowed only when its Pipeline catalog fingerprint matches the admitted catalog; otherwise the adapter requires re-inspection rather than invoking an unreviewed schema.
 
 Unity Pipeline binds only to loopback and publishes its bearer token in the user-restricted project descriptor. ContextForge Unity reads that descriptor locally and never exposes the token as an MCP result.
 
