@@ -7196,8 +7196,9 @@ var require_dist = __commonJS({
 });
 
 // src/contextforge-unity.mjs
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { win32 as win32Path } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -16929,7 +16930,7 @@ var StdioServerTransport = class {
 };
 
 // src/contextforge-unity.mjs
-var ADAPTER_VERSION = "2.1.0";
+var ADAPTER_VERSION = "2.1.1";
 var UNITY_TOOL_PREFIX = "Unity_";
 var CONTEXTFORGE_UNITY_ROUTE_ARGUMENT = "_contextforgeUnity";
 var CONTEXTFORGE_UNITY_LIST_EDITORS_TOOL = "ContextForgeUnity.ListEditors";
@@ -16939,20 +16940,14 @@ var CAPTURE_EDITOR_IMAGE_TOOL = "ContextForgeUnity.CaptureEditorImage";
 var CAPTURE_ASSET_IMAGE_TOOL = "ContextForgeUnity.CaptureAssetImage";
 var DEFAULT_PIPELINE_TIMEOUT_MS = 15e3;
 var MAX_PIPELINE_COMMANDS = 1e3;
-var MAX_UNITY_DISCOVERY_DEPTH = 5;
+var UNITY_PROCESS_DISCOVERY_TIMEOUT_MS = 5e3;
 var IMAGE_DATA_MARKER = "[emitted as MCP image/png]";
-var DISCOVERY_SKIP_DIRECTORIES = /* @__PURE__ */ new Set([
-  ".git",
-  ".build",
-  "node_modules",
-  "library",
-  "temp",
-  "logs",
-  "obj",
-  "build",
-  "builds",
-  "usersettings"
-]);
+var UNITY_PROCESS_QUERY_SCRIPT = [
+  "$ErrorActionPreference='Stop'",
+  "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new()",
+  `$items=@(Get-CimInstance Win32_Process -Filter "Name='Unity.exe'" | Select-Object ProcessId,CommandLine)`,
+  "if($items.Count -eq 0){'[]'}else{$items | ConvertTo-Json -Compress}"
+].join("; ");
 var EXACT_READ_ONLY_COMMANDS = /* @__PURE__ */ new Set([
   "console",
   "console_status",
@@ -16972,7 +16967,7 @@ var READ_ONLY_ANNOTATIONS = Object.freeze({
 });
 var CONTEXTFORGE_UNITY_LIST_EDITORS_TOOL_DEFINITION = Object.freeze({
   name: CONTEXTFORGE_UNITY_LIST_EDITORS_TOOL,
-  description: "List live Unity Editor Pipeline instances discovered inside the configured ContextForge project scope.",
+  description: "List running Unity Editor Pipeline instances, their authoritative project identity, process id, and loopback Pipeline port.",
   inputSchema: Object.freeze({
     type: "object",
     properties: Object.freeze({}),
@@ -17099,26 +17094,22 @@ function normalizeUnityProjectRoot(value) {
   if (trimmed.includes(String.fromCharCode(0)) || /[\r\n]/.test(trimmed)) return null;
   return win32Path.normalize(trimmed).replace(/[\\/]+$/g, "");
 }
-function resolveUnityProjectRoot({
-  configuredRoot = process.env.CONTEXTFORGE_UNITY_PROJECT_ROOT
-} = {}) {
-  const configured = normalizeUnityProjectRoot(configuredRoot);
-  if (configured !== null) return configured;
-  throw new Error(
-    "ContextForge Unity requires CONTEXTFORGE_UNITY_PROJECT_ROOT. In ContextForge, bind the required launch input to the active project root."
-  );
+function normalizeContextProjectRoot(value) {
+  if (value === null || value === void 0 || value === "") return null;
+  return normalizeUnityProjectRoot(value);
 }
 function unityProjectPathWithinRoot(projectPathValue, projectRootValue) {
   const projectPath = normalizeUnityProjectRoot(projectPathValue);
-  const projectRoot = normalizeUnityProjectRoot(projectRootValue);
-  if (projectPath === null || projectRoot === null) return false;
+  const projectRoot = normalizeContextProjectRoot(projectRootValue);
+  if (projectPath === null) return false;
+  if (projectRoot === null) return true;
   const projectKey = normalizePathKey(projectPath);
   const rootKey = normalizePathKey(projectRoot);
   return projectKey === rootKey || projectKey.startsWith(rootKey + "\\");
 }
 function unityProjectPathMatchesRootExactly(projectPathValue, projectRootValue) {
   const projectPath = normalizeUnityProjectRoot(projectPathValue);
-  const projectRoot = normalizeUnityProjectRoot(projectRootValue);
+  const projectRoot = normalizeContextProjectRoot(projectRootValue);
   return projectPath !== null && projectRoot !== null && normalizePathKey(projectPath) === normalizePathKey(projectRoot);
 }
 var ROUTING_SCHEMA = Object.freeze({
@@ -17188,9 +17179,11 @@ function splitUnityRoutingArguments(value) {
 }
 function selectUnityRoute(routesValue, target = null, projectRootValue = null) {
   const routes = Array.isArray(routesValue) ? routesValue : [];
-  const projectRoot = normalizeUnityProjectRoot(projectRootValue);
-  if (projectRoot === null) throw new Error("UNITY_PROJECT_ROOT_INVALID");
-  const eligible = routes.filter(
+  const projectRoot = normalizeContextProjectRoot(projectRootValue);
+  if (projectRootValue !== null && projectRootValue !== void 0 && projectRootValue !== "" && projectRoot === null) {
+    throw new Error("UNITY_PROJECT_ROOT_INVALID");
+  }
+  const eligible = projectRoot === null ? routes : routes.filter(
     (route) => typeof route?.descriptor?.projectPath === "string" && unityProjectPathWithinRoot(route.descriptor.projectPath, projectRoot)
   );
   if (target !== null) {
@@ -17206,48 +17199,86 @@ function selectUnityRoute(routesValue, target = null, projectRootValue = null) {
     if (matches.length > 1) throw new Error("UNITY_TARGET_AMBIGUOUS");
     return matches[0];
   }
-  const exact = eligible.filter(
-    (route) => unityProjectPathMatchesRootExactly(route.descriptor.projectPath, projectRoot)
-  );
-  if (exact.length === 1) return exact[0];
-  if (exact.length > 1) throw new Error("UNITY_TARGET_AMBIGUOUS");
+  if (projectRoot !== null) {
+    const exact = eligible.filter(
+      (route) => unityProjectPathMatchesRootExactly(route.descriptor.projectPath, projectRoot)
+    );
+    if (exact.length === 1) return exact[0];
+    if (exact.length > 1) throw new Error("UNITY_TARGET_AMBIGUOUS");
+  }
   if (eligible.length === 0) throw new Error("UNITY_TARGET_UNAVAILABLE");
   if (eligible.length > 1) throw new Error("UNITY_TARGET_REQUIRED");
   return eligible[0];
 }
-async function discoverUnityProjectRoots(projectRootValue, { readdirImpl = readdir, maxDepth = MAX_UNITY_DISCOVERY_DEPTH } = {}) {
-  const projectRoot = normalizeUnityProjectRoot(projectRootValue);
-  if (projectRoot === null) throw new Error("UNITY_PROJECT_ROOT_INVALID");
-  if (!Number.isInteger(maxDepth) || maxDepth < 0 || maxDepth > 12) {
-    throw new Error("UNITY_DISCOVERY_DEPTH_INVALID");
-  }
-  const found = [];
-  async function visit(directory, depth) {
-    let entries;
-    try {
-      entries = await readdirImpl(directory, { withFileTypes: true });
-    } catch (error2) {
-      if (["ENOENT", "EACCES", "EPERM"].includes(error2?.code)) return;
-      throw error2;
-    }
-    const directories = entries.filter((entry) => typeof entry?.isDirectory === "function" && entry.isDirectory()).sort((left, right) => left.name.localeCompare(right.name));
-    const names = new Set(directories.map((entry) => entry.name.toLowerCase()));
-    if (names.has("assets") && names.has("projectsettings")) {
-      found.push(normalizeUnityProjectRoot(directory));
-      return;
-    }
-    if (depth >= maxDepth) return;
-    for (const entry of directories) {
-      if (DISCOVERY_SKIP_DIRECTORIES.has(entry.name.toLowerCase())) continue;
-      await visit(win32Path.join(directory, entry.name), depth + 1);
-    }
-  }
-  await visit(projectRoot, 0);
-  return Object.freeze(
-    [...new Set(found.filter((value) => value !== null))].sort(
-      (left, right) => left.localeCompare(right)
-    )
+function extractUnityProjectPathFromCommandLine(commandLine) {
+  if (typeof commandLine !== "string" || /AssetImportWorker/i.test(commandLine)) return null;
+  const match = commandLine.match(
+    /(?:^|\s)"?-projectpath"?(?:\s+|=)(?:"([^"]+)"|([^\s"]+))/i
   );
+  return normalizeUnityProjectRoot(match?.[1] ?? match?.[2] ?? null);
+}
+function parseUnityProcessSnapshot(value) {
+  let parsed = value;
+  if (typeof parsed === "string") {
+    const trimmed = parsed.trim();
+    if (trimmed === "") return Object.freeze([]);
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      throw new Error("UNITY_PROCESS_DISCOVERY_INVALID");
+    }
+  }
+  const items = Array.isArray(parsed) ? parsed : parsed === null ? [] : [parsed];
+  const seen = /* @__PURE__ */ new Set();
+  const editors = [];
+  for (const item of items) {
+    if (!isRecord(item)) continue;
+    const pid = Number(item.ProcessId ?? item.processId ?? item.pid);
+    const projectPath = extractUnityProjectPathFromCommandLine(
+      item.CommandLine ?? item.commandLine
+    );
+    if (!Number.isInteger(pid) || pid <= 0 || projectPath === null) continue;
+    const key = String(pid) + "|" + normalizePathKey(projectPath);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    editors.push(Object.freeze({ pid, projectPath }));
+  }
+  editors.sort((left, right) => {
+    const pathOrder = left.projectPath.localeCompare(right.projectPath);
+    return pathOrder !== 0 ? pathOrder : left.pid - right.pid;
+  });
+  return Object.freeze(editors);
+}
+function execFileText(execFileImpl, executable, args, options) {
+  return new Promise((resolve, reject) => {
+    execFileImpl(executable, args, options, (error2, stdout, stderr) => {
+      if (error2) {
+        error2.stderr = stderr;
+        reject(error2);
+        return;
+      }
+      resolve(typeof stdout === "string" ? stdout : String(stdout ?? ""));
+    });
+  });
+}
+async function discoverUnityEditorProcesses({
+  execFileImpl = execFile,
+  platform = process.platform,
+  timeoutMs = UNITY_PROCESS_DISCOVERY_TIMEOUT_MS
+} = {}) {
+  if (platform !== "win32") throw new Error("UNITY_PROCESS_DISCOVERY_UNSUPPORTED");
+  const stdout = await execFileText(
+    execFileImpl,
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", UNITY_PROCESS_QUERY_SCRIPT],
+    {
+      windowsHide: true,
+      timeout: timeoutMs,
+      maxBuffer: 1024 * 1024,
+      encoding: "utf8"
+    }
+  );
+  return parseUnityProcessSnapshot(stdout);
 }
 function pipelineDescriptorPath(projectRootValue) {
   const projectRoot = normalizeUnityProjectRoot(projectRootValue);
@@ -17350,9 +17381,13 @@ async function pipelineRequest(descriptor, pathname, {
 async function openLivePipeline(projectRootValue, {
   readFileImpl = readFile,
   fetchImpl = fetch,
-  timeoutMs = DEFAULT_PIPELINE_TIMEOUT_MS
+  timeoutMs = DEFAULT_PIPELINE_TIMEOUT_MS,
+  expectedPid = null
 } = {}) {
   const descriptor = await readPipelineDescriptor(projectRootValue, readFileImpl);
+  if (expectedPid !== null && (!Number.isInteger(expectedPid) || descriptor.pid !== expectedPid)) {
+    throw new Error("UNITY_PIPELINE_PID_MISMATCH");
+  }
   const status = await pipelineRequest(descriptor, "/api/status", {
     fetchImpl,
     timeoutMs
@@ -17683,7 +17718,7 @@ function unityRoutingError(error2, projectRoot, toolName = null) {
   }
   if (diagnostic.includes("UNITY_TARGET_UNAVAILABLE")) {
     return toolError(
-      "The requested Unity project is not currently available inside the configured ContextForge project scope."
+      "The requested Unity project is not currently available among the discovered Unity Editors."
     );
   }
   if (diagnostic.includes("UNITY_TARGET_INVALID") || diagnostic.includes("UNITY_PROJECT_ROOT_INVALID")) {
@@ -17695,17 +17730,19 @@ function unityRoutingError(error2, projectRoot, toolName = null) {
     );
   }
   return toolError(
-    "ContextForge Unity could not complete " + (toolName ?? "the request") + " inside " + projectRoot + ". " + diagnostic
+    "ContextForge Unity could not complete " + (toolName ?? "the request") + (projectRoot === null ? ". " : " inside " + projectRoot + ". ") + diagnostic
   );
 }
 async function startContextForgeUnity({
-  projectRoot = resolveUnityProjectRoot(),
+  projectRoot = process.env.CONTEXTFORGE_UNITY_PROJECT_ROOT ?? null,
   readFileImpl = readFile,
-  readdirImpl = readdir,
+  execFileImpl = execFile,
   fetchImpl = fetch
 } = {}) {
-  const normalizedProjectRoot = normalizeUnityProjectRoot(projectRoot);
-  if (normalizedProjectRoot === null) throw new Error("UNITY_PROJECT_ROOT_INVALID");
+  const normalizedProjectRoot = normalizeContextProjectRoot(projectRoot);
+  if (projectRoot !== null && projectRoot !== void 0 && projectRoot !== "" && normalizedProjectRoot === null) {
+    throw new Error("UNITY_PROJECT_ROOT_INVALID");
+  }
   const server = new Server(
     { name: "contextforge-unity", version: ADAPTER_VERSION },
     { capabilities: { tools: {} } }
@@ -17714,11 +17751,12 @@ async function startContextForgeUnity({
   let publishedCatalogFingerprint = null;
   let publishedCatalogIdentity = null;
   async function discoverRoutes() {
-    const roots = await discoverUnityProjectRoots(normalizedProjectRoot, { readdirImpl });
+    const processes = await discoverUnityEditorProcesses({ execFileImpl });
     const attempts = await Promise.allSettled(
-      roots.map(async (root) => {
-        const live = await openLivePipeline(root, {
+      processes.map(async (candidate) => {
+        const live = await openLivePipeline(candidate.projectPath, {
           readFileImpl,
+          expectedPid: candidate.pid,
           ...requestOptions
         });
         return {
@@ -17729,26 +17767,32 @@ async function startContextForgeUnity({
         };
       })
     );
-    return attempts.filter((item) => item.status === "fulfilled").map((item) => item.value).filter(
-      (route) => unityProjectPathWithinRoot(route.descriptor.projectPath, normalizedProjectRoot)
-    ).sort((left, right) => {
+    return attempts.filter((item) => item.status === "fulfilled").map((item) => item.value).sort((left, right) => {
       const pathOrder = left.descriptor.projectPath.localeCompare(
         right.descriptor.projectPath
       );
       return pathOrder !== 0 ? pathOrder : left.descriptor.port - right.descriptor.port;
     });
   }
-  function selectCatalogRoute(routes) {
-    const exact = routes.filter(
-      (route) => unityProjectPathMatchesRootExactly(
-        route.descriptor.projectPath,
-        normalizedProjectRoot
-      )
+  function eligibleRoutes(routes) {
+    if (normalizedProjectRoot === null) return routes;
+    return routes.filter(
+      (route) => unityProjectPathWithinRoot(route.descriptor.projectPath, normalizedProjectRoot)
     );
-    if (exact.length === 1) return exact[0];
-    if (exact.length > 1) throw new Error("UNITY_TARGET_AMBIGUOUS");
-    if (routes.length === 0) throw new Error("UNITY_TARGET_UNAVAILABLE");
-    return routes[0];
+  }
+  function selectCatalogRoute(routes) {
+    const eligible = eligibleRoutes(routes);
+    if (eligible.length === 0) throw new Error("UNITY_TARGET_UNAVAILABLE");
+    if (normalizedProjectRoot !== null) {
+      const exact = eligible.filter(
+        (route) => unityProjectPathMatchesRootExactly(
+          route.descriptor.projectPath,
+          normalizedProjectRoot
+        )
+      );
+      if (exact.length === 1) return exact[0];
+    }
+    return eligible[0];
   }
   async function ensureCatalog(route) {
     if (route.commands === null) {
@@ -17804,8 +17848,15 @@ async function startContextForgeUnity({
       const routes = await discoverRoutes();
       if (toolName === CONTEXTFORGE_UNITY_LIST_EDITORS_TOOL) {
         return toolPayloadResult({
-          projectScope: normalizedProjectRoot,
-          editors: routes.map(editorSummary)
+          projectRoot: normalizedProjectRoot,
+          discovery: { source: "Unity.exe -projectPath" },
+          editors: routes.map((route2) => ({
+            ...editorSummary(route2),
+            eligibleForProjectRoot: normalizedProjectRoot === null || unityProjectPathWithinRoot(
+              route2.descriptor.projectPath,
+              normalizedProjectRoot
+            )
+          }))
         });
       }
       const split = splitUnityRoutingArguments(request.params.arguments ?? {});
@@ -17815,7 +17866,7 @@ async function startContextForgeUnity({
       const args = split.arguments;
       if (toolName === CONTEXTFORGE_UNITY_STATUS_TOOL) {
         return toolPayloadResult({
-          projectScope: normalizedProjectRoot,
+          projectRoot: normalizedProjectRoot,
           ...editorSummary({ descriptor, status })
         });
       }
@@ -17882,23 +17933,25 @@ export {
   CONTEXTFORGE_UNITY_STATUS_TOOL,
   DEFAULT_PIPELINE_TIMEOUT_MS,
   MAX_PIPELINE_COMMANDS,
-  MAX_UNITY_DISCOVERY_DEPTH,
+  UNITY_PROCESS_DISCOVERY_TIMEOUT_MS,
   UNITY_TOOL_PREFIX,
   addUnityRoutingTargetToTool,
   commandToTool,
-  discoverUnityProjectRoots,
+  discoverUnityEditorProcesses,
   executePipelineCommand,
+  extractUnityProjectPathFromCommandLine,
   fetchPipelineCatalog,
   fingerprintPipelineCommands,
   isReadOnlyPipelineCommand,
+  normalizeContextProjectRoot,
   normalizeUnityProjectRoot,
   openLivePipeline,
+  parseUnityProcessSnapshot,
   pipelineCommandName,
   pipelineDescriptorPath,
   pipelineRequest,
   pipelineResponseToToolResult,
   readPipelineDescriptor,
-  resolveUnityProjectRoot,
   selectUnityRoute,
   splitUnityRoutingArguments,
   startContextForgeUnity,

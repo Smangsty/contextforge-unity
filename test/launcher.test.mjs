@@ -4,11 +4,13 @@ import test from "node:test";
 import {
   addUnityRoutingTargetToTool,
   commandToTool,
-  discoverUnityProjectRoots,
+  discoverUnityEditorProcesses,
+  extractUnityProjectPathFromCommandLine,
   isReadOnlyPipelineCommand,
+  normalizeContextProjectRoot,
   normalizeUnityProjectRoot,
   openLivePipeline,
-  resolveUnityProjectRoot,
+  parseUnityProcessSnapshot,
   pipelineCommandName,
   pipelineResponseToToolResult,
   selectUnityRoute,
@@ -39,40 +41,60 @@ test("normalizes Unity project roots", () => {
   assert.equal(normalizeUnityProjectRoot("relative"), null);
 });
 
-test("requires an explicit ContextForge project-root binding", () => {
-  assert.equal(resolveUnityProjectRoot({ configuredRoot: ROOT }), ROOT);
-  assert.throws(
-    () => resolveUnityProjectRoot({ configuredRoot: "" }),
-    /requires CONTEXTFORGE_UNITY_PROJECT_ROOT/
+test("treats the ContextForge project root as optional scope", () => {
+  assert.equal(normalizeContextProjectRoot(ROOT), ROOT);
+  assert.equal(normalizeContextProjectRoot(""), null);
+  assert.equal(normalizeContextProjectRoot(null), null);
+});
+
+test("extracts authoritative Unity project paths from Editor command lines", () => {
+  assert.equal(
+    extractUnityProjectPathFromCommandLine(
+      '"C:\\Program Files\\Unity\\Editor\\Unity.exe" "-projectpath" "C:\\Unity Projects\\Game A" -useHub'
+    ),
+    "C:\\Unity Projects\\Game A"
+  );
+  assert.equal(
+    extractUnityProjectPathFromCommandLine(
+      'Unity.exe -name AssetImportWorker0 -projectPath "C:\\Unity Projects\\Game A"'
+    ),
+    null
   );
 });
 
-test("discovers Unity projects inside a ContextForge workspace without descending into project internals", async () => {
-  const WORKSPACE = "C:\\Workspace";
-  const tree = new Map([
-    [WORKSPACE.toLowerCase(), ["GameA", "Group", "node_modules"]],
-    ["c:\\workspace\\gamea", ["Assets", "ProjectSettings", "Library"]],
-    ["c:\\workspace\\group", ["GameB"]],
-    ["c:\\workspace\\group\\gameb", ["Assets", "ProjectSettings"]],
-    ["c:\\workspace\\node_modules", ["ShouldNotBeVisited"]]
+test("discovers running Unity Editors independently of ContextForge project scope", async () => {
+  const snapshot = JSON.stringify([
+    {
+      ProcessId: 101,
+      CommandLine: 'Unity.exe -projectPath "C:\\Unity Projects\\Game A"'
+    },
+    {
+      ProcessId: 102,
+      CommandLine: 'Unity.exe -name AssetImportWorker0 -projectPath "C:\\Unity Projects\\Game A"'
+    },
+    {
+      ProcessId: 103,
+      CommandLine: 'Unity.exe -projectPath "C:\\Unity Projects\\Game B"'
+    }
   ]);
-  const visited = [];
-  const roots = await discoverUnityProjectRoots(WORKSPACE, {
-    readdirImpl: async (directory) => {
-      visited.push(directory.toLowerCase());
-      return (tree.get(directory.toLowerCase()) ?? []).map((name) => ({
-        name,
-        isDirectory: () => true
-      }));
+  assert.deepEqual(parseUnityProcessSnapshot(snapshot), [
+    { pid: 101, projectPath: "C:\\Unity Projects\\Game A" },
+    { pid: 103, projectPath: "C:\\Unity Projects\\Game B" }
+  ]);
+
+  let executable = null;
+  const editors = await discoverUnityEditorProcesses({
+    platform: "win32",
+    execFileImpl: (file, args, options, callback) => {
+      executable = file;
+      callback(null, snapshot, "");
     }
   });
-
-  assert.deepEqual(roots, [
-    "C:\\Workspace\\GameA",
-    "C:\\Workspace\\Group\\GameB"
+  assert.equal(executable, "powershell.exe");
+  assert.deepEqual(editors, [
+    { pid: 101, projectPath: "C:\\Unity Projects\\Game A" },
+    { pid: 103, projectPath: "C:\\Unity Projects\\Game B" }
   ]);
-  assert.equal(visited.includes("c:\\workspace\\gamea\\library"), false);
-  assert.equal(visited.includes("c:\\workspace\\node_modules"), false);
 });
 
 test("routes calls by Unity project identity and strips adapter metadata", () => {
@@ -82,6 +104,9 @@ test("routes calls by Unity project identity and strips adapter metadata", () =>
   const routes = [gameA, gameB];
 
   assert.equal(unityProjectPathWithinRoot(gameA.descriptor.projectPath, scope), true);
+  assert.equal(unityProjectPathWithinRoot(gameA.descriptor.projectPath, null), true);
+  assert.equal(selectUnityRoute([gameA], null, null), gameA);
+  assert.throws(() => selectUnityRoute(routes, null, null), /UNITY_TARGET_REQUIRED/);
   assert.throws(() => selectUnityRoute(routes, null, scope), /UNITY_TARGET_REQUIRED/);
   assert.equal(
     selectUnityRoute(
@@ -156,6 +181,25 @@ test("actively probes Pipeline instead of rejecting an old heartbeat", async () 
 
   assert.equal(requested, "http://127.0.0.1:7802/api/status");
   assert.equal(live.status.status, "ready");
+});
+
+test("rejects a stale Pipeline descriptor owned by a different Unity process", async () => {
+  const descriptorJson = JSON.stringify({
+    pid: 123,
+    port: 7802,
+    projectPath: ROOT,
+    evalToken: "1234567890abcdef"
+  });
+
+  await assert.rejects(
+    () =>
+      openLivePipeline(ROOT, {
+        expectedPid: 999,
+        readFileImpl: async () => descriptorJson,
+        fetchImpl: async () => fakeResponse({ status: "ready" })
+      }),
+    /PID_MISMATCH/
+  );
 });
 
 test("maps Pipeline command names to ContextForge Unity tools", () => {

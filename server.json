@@ -3,21 +3,21 @@
   "name": "io.github.smangsty/contextforge-unity",
   "title": "ContextForge Unity",
   "description": "Thin ContextForge stdio adapter for Unity Pipeline.",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "contextforge-unity",
-      "version": "2.1.0",
+      "version": "2.1.1",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
         {
           "name": "CONTEXTFORGE_UNITY_PROJECT_ROOT",
-          "description": "Required ContextForge scope root. It may be one Unity project or a workspace containing multiple Unity projects; use the active project root binding.",
+          "description": "Optional project root used to scope discovered Unity Editor instances. Bind this to ContextForge's active project root when appropriate.",
           "format": "filepath",
-          "isRequired": true,
+          "isRequired": false,
           "isSecret": false
         }
       ]

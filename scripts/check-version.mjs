@@ -32,12 +32,12 @@ if (
   adapterVersionMatch !== packageJson.version ||
   matchingPackages.length !== 1 ||
   rootLaunchInput?.format !== "filepath" ||
-  rootLaunchInput?.isRequired !== true ||
+  rootLaunchInput?.isRequired !== false ||
   rootLaunchInput?.isSecret !== false ||
   runtimeDependencies.length !== 0
 ) {
   throw new Error(
-    "Package, lockfile, adapter, required active-project launch input, or runtime dependency policy is out of sync."
+    "Package, lockfile, adapter, optional active-project scope input, or runtime dependency policy is out of sync."
   );
 }
 

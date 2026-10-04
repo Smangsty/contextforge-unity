@@ -2,7 +2,7 @@
 
 A thin third-party ContextForge Skill that exposes Unity's local **Unity Pipeline** server as MCP tools.
 
-Version 2 removes the Unity AI Assistant relay dependency entirely. The adapter talks directly to the Pipeline server advertised by the active Unity project at:
+Version 2 removes the Unity AI Assistant relay dependency entirely. The adapter discovers running Unity Editors, resolves each Editor's authoritative `-projectPath`, and talks directly to the Pipeline server advertised by that project at:
 
 `<project>/Library/Pipeline/.unity-pipeline-port`
 
@@ -10,7 +10,8 @@ Version 2 removes the Unity AI Assistant relay dependency entirely. The adapter 
 
 ContextForge Unity:
 
-- reads the active project's Pipeline descriptor
+- discovers running Unity Editor processes independently of ContextForge project scope
+- reads each Editor's `-projectPath` and validates its project-local Pipeline descriptor
 - actively probes `/api/status` before using the descriptor, so an old stored heartbeat does not cause false disconnects
 - converts Unity Pipeline's live command catalog into MCP tools
 - forwards tool calls to Pipeline's authenticated loopback HTTP API
@@ -24,14 +25,13 @@ The adapter does **not** require Unity AI Assistant, Sentis, or Unity's old `%US
 ## Prerequisites
 
 - ContextForge on Windows
-- a supported Unity project with `com.unity.pipeline` installed and running
-- `CONTEXTFORGE_UNITY_PROJECT_ROOT` bound to ContextForge's active project root
+- one or more supported Unity projects with `com.unity.pipeline` installed and running
 
-The project-root launch input is required. During install or update, choose **Use active project root** before inspection. The bound path is a **scope**: it may be an exact Unity project or a workspace containing several Unity projects. The adapter intentionally does not fall back to its package working directory, because that can silently inspect the wrong path.
+`CONTEXTFORGE_UNITY_PROJECT_ROOT` is optional, matching ContextForge Unreal. When present it scopes and auto-selects discovered Editors. When absent, discovery still works and a single running Editor routes automatically.
 
 ### Multi-project routing
 
-ContextForge Unity 2.1 discovers Unity projects inside the configured scope by looking for normal Unity project roots (`Assets/` + `ProjectSettings/`). Once a project root is found, discovery stops descending into that project, so it never crawls `Library/`, `Temp/`, package caches, or asset trees. Each candidate is accepted only when its project-local `Library/Pipeline/.unity-pipeline-port` descriptor is present and `/api/status` answers successfully.
+ContextForge Unity follows the same discovery-first, scope-second model as ContextForge Unreal. It enumerates running `Unity.exe` Editor processes, reads each Editor's `-projectPath`, then accepts the candidate only when the matching project-local `Library/Pipeline/.unity-pipeline-port` descriptor belongs to that process and `/api/status` answers successfully. Asset trees and workspace folders are never crawled to discover Editors.
 
 `ContextForgeUnity.ListEditors` returns the live project path, project name, Unity version, PID, Pipeline port, mode, capabilities, and status for every discovered Editor without exposing the Pipeline bearer token.
 
@@ -48,7 +48,7 @@ Every routable Unity tool receives an optional `_contextforgeUnity` object:
 
 `projectPath` is authoritative. `port` is optional and only disambiguates duplicate live instances of the same project path. The adapter removes `_contextforgeUnity` before forwarding parameters to Pipeline.
 
-When the ContextForge scope is an exact Unity project, that Editor is selected automatically. When a workspace contains multiple live Unity projects and no exact project matches the scope root, calls must route explicitly after `ContextForgeUnity.ListEditors`. The tool catalog admitted by ContextForge comes from one live Editor. Calls to another Editor are allowed only when its Pipeline catalog fingerprint matches the admitted catalog; otherwise the adapter requires re-inspection rather than invoking an unreviewed schema.
+When exactly one eligible Unity Editor is running, it is selected automatically even when no ContextForge project root is configured. When the optional ContextForge root exactly matches one Editor, that Editor is preferred. When multiple Editors remain eligible, calls must route explicitly after `ContextForgeUnity.ListEditors`. The tool catalog admitted by ContextForge comes from one live Editor. Calls to another Editor are allowed only when its Pipeline catalog fingerprint matches the admitted catalog; otherwise the adapter requires re-inspection rather than invoking an unreviewed schema.
 
 Unity Pipeline binds only to loopback and publishes its bearer token in the user-restricted project descriptor. ContextForge Unity reads that descriptor locally and never exposes the token as an MCP result.
 
@@ -115,12 +115,14 @@ The formatter uses Pipeline's structured `level`, `logType`, `counts`, `groundTr
 
 Pipeline refreshes the descriptor's `lastHeartbeat` when a status request succeeds. ContextForge Unity therefore does **not** reject a descriptor merely because its stored heartbeat is old.
 
-For every connection sequence the adapter:
+For every discovery/connection sequence the adapter:
 
-1. reads the active project's descriptor
-2. verifies the descriptor belongs to that exact project
-3. calls `/api/status`
-4. uses the descriptor only if the live Pipeline server answers
+1. enumerates running Unity Editor processes
+2. extracts each Editor's authoritative `-projectPath`
+3. reads that project's Pipeline descriptor
+4. verifies the descriptor project path and PID match the discovered Editor
+5. calls `/api/status`
+6. uses the descriptor only if the live Pipeline server answers
 
 This lets the adapter recover cleanly after Unity domain reloads and avoids the stale-heartbeat deadlock that the old relay-based adapter could hit.
 
@@ -143,7 +145,8 @@ The adapter remains deliberately thin:
 
 - no runtime npm dependencies
 - Node 20 built-in `fetch` for Pipeline HTTP
-- one descriptor read and status probe when connecting
+- bounded Windows process enumeration using a fixed PowerShell/CIM query
+- one descriptor read and status probe per discovered Unity Editor
 - Pipeline supplies the schemas and performs the actual Unity work
 - base64 image data is promoted to MCP image content and replaced with a compact marker in text/structured output
 
@@ -157,7 +160,7 @@ npm.cmd run check-version
 npm.cmd pack
 ```
 
-The unit suite covers project identity, active heartbeat probing, tool mapping, effect classification, Console severity, and image promotion.
+The unit suite covers independent Editor-process discovery, optional project scoping, project/PID identity, active heartbeat probing, tool mapping, effect classification, Console severity, and image promotion.
 
 Live smoke validation should additionally verify:
 
