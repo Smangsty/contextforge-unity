@@ -11,7 +11,7 @@ import {
   ListToolsRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
 
-export const ADAPTER_VERSION = "2.0.0";
+export const ADAPTER_VERSION = "2.0.1";
 export const UNITY_TOOL_PREFIX = "Unity_";
 export const CONTEXTFORGE_UNITY_STATUS_TOOL = "ContextForgeUnity.Status";
 export const CAPTURE_VIEWPORT_TOOL = "ContextForgeUnity.CaptureViewport";
@@ -172,17 +172,13 @@ export function normalizeUnityProjectRoot(value) {
 }
 
 export function resolveUnityProjectRoot({
-  configuredRoot = process.env.CONTEXTFORGE_UNITY_PROJECT_ROOT,
-  cwd = process.cwd()
+  configuredRoot = process.env.CONTEXTFORGE_UNITY_PROJECT_ROOT
 } = {}) {
   const configured = normalizeUnityProjectRoot(configuredRoot);
   if (configured !== null) return configured;
 
-  const current = normalizeUnityProjectRoot(cwd);
-  if (current !== null) return current;
-
   throw new Error(
-    "ContextForge Unity could not resolve a Unity project root. Configure CONTEXTFORGE_UNITY_PROJECT_ROOT to ContextForge's active project root."
+    "ContextForge Unity requires CONTEXTFORGE_UNITY_PROJECT_ROOT. In ContextForge, bind the required launch input to the active project root."
   );
 }
 

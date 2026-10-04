@@ -1,6 +1,6 @@
 {
   "name": "contextforge-unity",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Thin ContextForge stdio adapter for Unity Pipeline.",
   "type": "module",
   "bin": {

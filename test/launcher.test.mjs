@@ -6,6 +6,7 @@ import {
   isReadOnlyPipelineCommand,
   normalizeUnityProjectRoot,
   openLivePipeline,
+  resolveUnityProjectRoot,
   pipelineCommandName,
   pipelineResponseToToolResult,
   unityToolName,
@@ -31,6 +32,14 @@ test("normalizes Unity project roots", () => {
     ROOT
   );
   assert.equal(normalizeUnityProjectRoot("relative"), null);
+});
+
+test("requires an explicit ContextForge project-root binding", () => {
+  assert.equal(resolveUnityProjectRoot({ configuredRoot: ROOT }), ROOT);
+  assert.throws(
+    () => resolveUnityProjectRoot({ configuredRoot: "" }),
+    /requires CONTEXTFORGE_UNITY_PROJECT_ROOT/
+  );
 });
 
 test("validates Pipeline descriptor project identity", () => {

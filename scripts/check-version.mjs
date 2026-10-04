@@ -21,6 +21,9 @@ const adapterVersionMatch = adapterSource.match(
 )?.[1];
 const lockRootVersion = packageLock.packages?.[""]?.version;
 const runtimeDependencies = Object.keys(packageJson.dependencies ?? {});
+const rootLaunchInput = matchingPackages[0]?.environmentVariables?.find(
+  (item) => item?.name === "CONTEXTFORGE_UNITY_PROJECT_ROOT"
+);
 
 if (
   serverJson.version !== packageJson.version ||
@@ -28,10 +31,13 @@ if (
   lockRootVersion !== packageJson.version ||
   adapterVersionMatch !== packageJson.version ||
   matchingPackages.length !== 1 ||
+  rootLaunchInput?.format !== "filepath" ||
+  rootLaunchInput?.isRequired !== true ||
+  rootLaunchInput?.isSecret !== false ||
   runtimeDependencies.length !== 0
 ) {
   throw new Error(
-    "Package, lockfile, adapter, server manifest, or runtime dependency policy is out of sync."
+    "Package, lockfile, adapter, required active-project launch input, or runtime dependency policy is out of sync."
   );
 }
 

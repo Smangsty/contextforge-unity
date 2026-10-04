@@ -27,6 +27,8 @@ The adapter does **not** require Unity AI Assistant, Sentis, or Unity's old `%US
 - a supported Unity project with `com.unity.pipeline` installed and running
 - `CONTEXTFORGE_UNITY_PROJECT_ROOT` bound to ContextForge's active Unity project root
 
+The project-root launch input is required. During install or update, choose **Use active project root** before inspection. The adapter intentionally does not fall back to its package working directory, because that can silently inspect the wrong path.
+
 Unity Pipeline binds only to loopback and publishes its bearer token in the user-restricted project descriptor. ContextForge Unity reads that descriptor locally and never exposes the token as an MCP result.
 
 ## Tool surface

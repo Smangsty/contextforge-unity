@@ -16928,7 +16928,7 @@ var StdioServerTransport = class {
 };
 
 // src/contextforge-unity.mjs
-var ADAPTER_VERSION = "2.0.0";
+var ADAPTER_VERSION = "2.0.1";
 var UNITY_TOOL_PREFIX = "Unity_";
 var CONTEXTFORGE_UNITY_STATUS_TOOL = "ContextForgeUnity.Status";
 var CAPTURE_VIEWPORT_TOOL = "ContextForgeUnity.CaptureViewport";
@@ -17074,15 +17074,12 @@ function normalizeUnityProjectRoot(value) {
   return win32Path.normalize(trimmed).replace(/[\\/]+$/g, "");
 }
 function resolveUnityProjectRoot({
-  configuredRoot = process.env.CONTEXTFORGE_UNITY_PROJECT_ROOT,
-  cwd = process.cwd()
+  configuredRoot = process.env.CONTEXTFORGE_UNITY_PROJECT_ROOT
 } = {}) {
   const configured = normalizeUnityProjectRoot(configuredRoot);
   if (configured !== null) return configured;
-  const current = normalizeUnityProjectRoot(cwd);
-  if (current !== null) return current;
   throw new Error(
-    "ContextForge Unity could not resolve a Unity project root. Configure CONTEXTFORGE_UNITY_PROJECT_ROOT to ContextForge's active project root."
+    "ContextForge Unity requires CONTEXTFORGE_UNITY_PROJECT_ROOT. In ContextForge, bind the required launch input to the active project root."
   );
 }
 function pipelineDescriptorPath(projectRootValue) {
