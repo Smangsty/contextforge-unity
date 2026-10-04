@@ -1,7 +1,7 @@
 {
   "name": "contextforge-unity",
-  "version": "1.0.1",
-  "description": "Thin ContextForge adapter for Unity Technologies' official Unity MCP relay.",
+  "version": "2.0.0",
+  "description": "Thin ContextForge stdio adapter for Unity Pipeline.",
   "type": "module",
   "bin": {
     "contextforge-unity": "bin/contextforge-unity.mjs"
@@ -13,18 +13,23 @@
     "LICENSE"
   ],
   "scripts": {
+    "build": "node scripts/build.mjs",
     "test": "node --test",
     "check-version": "node scripts/check-version.mjs",
-    "prepack": "npm test && npm run check-version"
+    "prepack": "npm run build && npm test && npm run check-version"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "esbuild": "0.25.10"
   },
   "keywords": [
     "contextforge",
     "mcp",
     "unity",
-    "unity-ai"
+    "unity-pipeline"
   ],
   "license": "MIT",
   "homepage": "https://github.com/Smangsty/contextforge-unity",

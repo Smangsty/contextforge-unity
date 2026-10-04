@@ -2,17 +2,25 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.smangsty/contextforge-unity",
   "title": "ContextForge Unity",
-  "description": "Thin ContextForge adapter for Unity Technologies' official Unity MCP relay.",
-  "version": "1.0.1",
+  "description": "Thin ContextForge stdio adapter for Unity Pipeline.",
+  "version": "2.0.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "contextforge-unity",
-      "version": "1.0.1",
+      "version": "2.0.0",
       "transport": {
         "type": "stdio"
       },
-      "environmentVariables": []
+      "environmentVariables": [
+        {
+          "name": "CONTEXTFORGE_UNITY_PROJECT_ROOT",
+          "description": "Unity project root containing Library/Pipeline/.unity-pipeline-port. Bind this to ContextForge's active project root.",
+          "format": "filepath",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
     }
   ]
 }
